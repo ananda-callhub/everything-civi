@@ -28,5 +28,9 @@ everything-civi = "everything_civi.server:main"
 line-length = 120
 target-version = "py311"
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/everything_civi"]

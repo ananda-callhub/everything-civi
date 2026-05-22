@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import httpx
 from typing import Any
 
@@ -28,7 +30,6 @@ class CiviCRMClient:
                 base_url=self._config.base_url.rstrip("/"),
                 headers={
                     "Authorization": f"Bearer {self._config.api_key}",
-                    "Content-Type": "application/json",
                     "X-Requested-With": "XMLHttpRequest",
                 },
                 verify=self._config.verify_ssl,
@@ -44,10 +45,10 @@ class CiviCRMClient:
     ) -> dict[str, Any]:
         client = self._get_client()
         url = f"/civicrm/ajax/api4/{entity}/{action}"
-        body = params if params is not None else {}
+        form_data = {"params": json.dumps(params)} if params else {}
 
         try:
-            response = await client.post(url, json=body)
+            response = await client.post(url, data=form_data)
             response.raise_for_status()
         except httpx.TimeoutException:
             raise CiviCRMAPIError(error_message=f"Request timed out: {url}")
