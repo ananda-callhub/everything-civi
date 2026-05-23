@@ -324,7 +324,7 @@ async def test_manage_relationship_disable(mock_client: MockCiviCRMClient, tools
         contact_id_a=10, contact_id_b=20, relationship_type="Employee of", action="disable",
     ))
     # Should look up type, then find existing, then update
-    assert mock_client.calls[0] == ("RelationshipType", "get", mock_client.calls[0][2])
+    assert mock_client.calls[0][:3] == ("RelationshipType", "get", mock_client.calls[0][2])
     assert mock_client.calls[1][0] == "Relationship"
     assert mock_client.calls[1][1] == "get"
     assert mock_client.calls[2][0] == "Relationship"
@@ -346,3 +346,101 @@ async def test_register_event_missing_contribution_amount(mock_client: MockCiviC
         contact_id=1, event_id=5, record_contribution=True, contribution_amount=None,
     ))
     assert "error" in result
+    # Validation should happen BEFORE any API calls — no participant created
+    assert len(mock_client.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_register_for_event_contribution_failure_rolls_back(
+    mock_client: MockCiviCRMClient, tools,
+):
+    """When Contribution.create fails, the participant should be cleaned up."""
+    mock_client.set_response("Event", "get", {
+        "values": [{"title": "Gala", "financial_type_id:name": "Event Fee"}],
+    })
+    mock_client.set_response("Participant", "create", {
+        "values": [{"id": 50}],
+    })
+    mock_client.set_error("Contribution", "create", "Insufficient funds", 400)
+    # Participant.delete for cleanup — use default empty response
+    mock_client.set_response("Participant", "delete", {"values": []})
+
+    result = await tools["civicrm_register_for_event"](
+        contact_id=1, event_id=5, record_contribution=True, contribution_amount=100.0,
+    )
+
+    # Should report rollback error
+    assert "Error registering for event" in result
+    assert "rolled back" in result
+
+    # Verify cleanup: Participant.delete was called with the orphaned participant ID
+    delete_calls = [
+        c for c in mock_client.calls
+        if c[0] == "Participant" and c[1] == "delete"
+    ]
+    assert len(delete_calls) == 1
+    assert delete_calls[0][2]["where"] == [["id", "=", 50]]
+
+
+@pytest.mark.asyncio
+async def test_register_for_event_payment_link_failure_rolls_back(
+    mock_client: MockCiviCRMClient, tools,
+):
+    """When ParticipantPayment.create fails, both participant and contribution are cleaned up."""
+    mock_client.set_response("Event", "get", {
+        "values": [{"title": "Gala", "financial_type_id:name": "Event Fee"}],
+    })
+    mock_client.set_response("Participant", "create", {
+        "values": [{"id": 50}],
+    })
+    mock_client.set_response("Contribution", "create", {
+        "values": [{"id": 200}],
+    })
+    mock_client.set_error("ParticipantPayment", "create", "Link failed", 500)
+    # Cleanup responses
+    mock_client.set_response("Contribution", "delete", {"values": []})
+    mock_client.set_response("Participant", "delete", {"values": []})
+
+    result = await tools["civicrm_register_for_event"](
+        contact_id=1, event_id=5, record_contribution=True, contribution_amount=100.0,
+    )
+
+    # Should report rollback error
+    assert "Error registering for event" in result
+    assert "rolled back" in result
+
+    # Verify cleanup: both Contribution.delete and Participant.delete were called
+    contrib_delete_calls = [
+        c for c in mock_client.calls
+        if c[0] == "Contribution" and c[1] == "delete"
+    ]
+    assert len(contrib_delete_calls) == 1
+    assert contrib_delete_calls[0][2]["where"] == [["id", "=", 200]]
+
+    participant_delete_calls = [
+        c for c in mock_client.calls
+        if c[0] == "Participant" and c[1] == "delete"
+    ]
+    assert len(participant_delete_calls) == 1
+    assert participant_delete_calls[0][2]["where"] == [["id", "=", 50]]
+
+
+@pytest.mark.asyncio
+async def test_record_contribution_note_failure_returns_warning(
+    mock_client: MockCiviCRMClient, tools,
+):
+    """When Note.create fails, contribution is kept but a warning is included."""
+    mock_client.set_response("Contribution", "create", {
+        "values": [{"id": 101}],
+    })
+    mock_client.set_error("Note", "create", "Note storage error", 500)
+
+    result = json.loads(await tools["civicrm_record_contribution"](
+        contact_id=1, total_amount=25.0, note="Thank you gift",
+    ))
+
+    # Contribution should still be returned successfully
+    assert result["values"][0]["id"] == 101
+    # Warning should be present
+    assert "note_warning" in result
+    assert "Note storage error" in result["note_warning"]

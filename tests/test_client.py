@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from everything_civi.client import CiviCRMAPIError, CiviCRMClient
@@ -196,3 +198,164 @@ def test_api_error_default_code():
     """CiviCRMAPIError defaults error_code to 0."""
     err = CiviCRMAPIError("oops")
     assert err.error_code == 0
+
+
+# ---------------------------------------------------------------------------
+# JWT / per-request token forwarding
+# ---------------------------------------------------------------------------
+
+def _make_client_with_mock_http(api_key: str = "default-key") -> tuple[CiviCRMClient, AsyncMock]:
+    """Create a CiviCRMClient whose httpx client is a mock returning valid JSON."""
+    os.environ["CIVICRM_BASE_URL"] = "https://test.example.com"
+    os.environ["CIVICRM_API_KEY"] = api_key
+    os.environ["CIVICRM_AUDIT_LOG"] = "false"
+    try:
+        config = CiviCRMConfig()
+    finally:
+        os.environ.pop("CIVICRM_BASE_URL", None)
+        os.environ.pop("CIVICRM_API_KEY", None)
+        os.environ.pop("CIVICRM_AUDIT_LOG", None)
+
+    client = CiviCRMClient(config)
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 200
+    mock_response.headers = {"content-type": "application/json"}
+    mock_response.json.return_value = {"values": [{"id": 1}]}
+    mock_response.raise_for_status = MagicMock()
+
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.post = AsyncMock(return_value=mock_response)
+
+    client._get_client = MagicMock(return_value=mock_http)
+    return client, mock_http
+
+
+@pytest.mark.asyncio
+async def test_api4_with_token_override():
+    """When token is passed, the request uses that token instead of the default API key."""
+    client, mock_http = _make_client_with_mock_http(api_key="default-key")
+
+    result = await client.api4("Contact", "get", {"limit": 5}, token="jwt-user-token-123")
+
+    assert result == {"values": [{"id": 1}]}
+    mock_http.post.assert_called_once()
+    call_kwargs = mock_http.post.call_args
+    # The per-request headers should contain the overridden Authorization
+    assert call_kwargs.kwargs["headers"] == {"Authorization": "Bearer jwt-user-token-123"}
+
+
+@pytest.mark.asyncio
+async def test_api4_without_token_uses_default():
+    """Without token, no per-request Authorization header is sent (default client header applies)."""
+    client, mock_http = _make_client_with_mock_http(api_key="default-key")
+
+    result = await client.api4("Contact", "get", {"limit": 5})
+
+    assert result == {"values": [{"id": 1}]}
+    mock_http.post.assert_called_once()
+    call_kwargs = mock_http.post.call_args
+    # No per-request headers override — client default Authorization is used
+    assert call_kwargs.kwargs["headers"] is None
+
+
+@pytest.mark.asyncio
+async def test_convenience_methods_forward_token():
+    """Convenience methods (get, create, update, delete, save, replace, get_fields, get_actions)
+    forward the token kwarg to api4."""
+    user_token = "jwt-forwarded-token"
+
+    # Test get()
+    client, mock_http = _make_client_with_mock_http()
+    await client.get("Contact", token=user_token, limit=10)
+    assert mock_http.post.call_args.kwargs["headers"] == {
+        "Authorization": f"Bearer {user_token}",
+    }
+
+    # Test create()
+    client, mock_http = _make_client_with_mock_http()
+    await client.create("Contact", {"first_name": "Test"}, token=user_token)
+    assert mock_http.post.call_args.kwargs["headers"] == {
+        "Authorization": f"Bearer {user_token}",
+    }
+
+    # Test update()
+    client, mock_http = _make_client_with_mock_http()
+    await client.update(
+        "Contact", {"first_name": "Updated"}, [["id", "=", 1]], token=user_token,
+    )
+    assert mock_http.post.call_args.kwargs["headers"] == {
+        "Authorization": f"Bearer {user_token}",
+    }
+
+    # Test delete()
+    client, mock_http = _make_client_with_mock_http()
+    await client.delete("Contact", [["id", "=", 1]], token=user_token)
+    assert mock_http.post.call_args.kwargs["headers"] == {
+        "Authorization": f"Bearer {user_token}",
+    }
+
+    # Test save()
+    client, mock_http = _make_client_with_mock_http()
+    await client.save("Contact", [{"first_name": "Test"}], token=user_token)
+    assert mock_http.post.call_args.kwargs["headers"] == {
+        "Authorization": f"Bearer {user_token}",
+    }
+
+    # Test replace()
+    client, mock_http = _make_client_with_mock_http()
+    await client.replace(
+        "Contact", [{"first_name": "New"}], [["id", "=", 1]], token=user_token,
+    )
+    assert mock_http.post.call_args.kwargs["headers"] == {
+        "Authorization": f"Bearer {user_token}",
+    }
+
+    # Test get_fields()
+    client, mock_http = _make_client_with_mock_http()
+    await client.get_fields("Contact", token=user_token)
+    assert mock_http.post.call_args.kwargs["headers"] == {
+        "Authorization": f"Bearer {user_token}",
+    }
+
+    # Test get_actions()
+    client, mock_http = _make_client_with_mock_http()
+    await client.get_actions("Contact", token=user_token)
+    assert mock_http.post.call_args.kwargs["headers"] == {
+        "Authorization": f"Bearer {user_token}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_token_not_logged_in_params():
+    """The token should not appear in audit-logged param_keys."""
+    os.environ["CIVICRM_BASE_URL"] = "https://test.example.com"
+    os.environ["CIVICRM_API_KEY"] = "default-key"
+    os.environ["CIVICRM_AUDIT_LOG"] = "true"
+    try:
+        config = CiviCRMConfig()
+    finally:
+        os.environ.pop("CIVICRM_BASE_URL", None)
+        os.environ.pop("CIVICRM_API_KEY", None)
+        os.environ.pop("CIVICRM_AUDIT_LOG", None)
+
+    client = CiviCRMClient(config)
+
+    mock_response = MagicMock(spec=httpx.Response)
+    mock_response.status_code = 200
+    mock_response.headers = {"content-type": "application/json"}
+    mock_response.json.return_value = {"values": []}
+    mock_response.raise_for_status = MagicMock()
+
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.post = AsyncMock(return_value=mock_response)
+    client._get_client = MagicMock(return_value=mock_http)
+
+    # token is a kwarg-only param, so it cannot accidentally end up in params dict
+    params = {"limit": 25, "where": [["id", ">", 0]]}
+    await client.api4("Event", "get", params, token="secret-jwt")
+
+    # Verify "token" is not among the param keys that would be logged
+    param_keys = client._audit_param_keys("Event", params)
+    assert "token" not in param_keys
+    assert param_keys == ["limit", "where"]

@@ -103,12 +103,17 @@ def register_workflow_tools(mcp: FastMCP, client) -> None:
 
             if note and result.get("values"):
                 contribution_id = result["values"][0]["id"]
-                await client.api4("Note", "create", {"values": {
-                    "entity_table": "civicrm_contribution",
-                    "entity_id": contribution_id,
-                    "note": note,
-                    "contact_id": contact_id,
-                }})
+                try:
+                    await client.api4("Note", "create", {"values": {
+                        "entity_table": "civicrm_contribution",
+                        "entity_id": contribution_id,
+                        "note": note,
+                        "contact_id": contact_id,
+                    }})
+                except CiviCRMAPIError as note_exc:
+                    result["note_warning"] = (
+                        f"Contribution created but note failed: {note_exc}"
+                    )
 
             return json.dumps(result, indent=2)
         except CiviCRMAPIError as exc:
@@ -215,6 +220,12 @@ def register_workflow_tools(mcp: FastMCP, client) -> None:
             contribution_amount: Required if record_contribution is True.
         """
         try:
+            # Validate inputs before any mutations
+            if record_contribution and contribution_amount is None:
+                return json.dumps({
+                    "error": "contribution_amount is required when record_contribution is True",
+                })
+
             participant_values: dict[str, Any] = {
                 "contact_id": contact_id,
                 "event_id": event_id,
@@ -224,56 +235,91 @@ def register_workflow_tools(mcp: FastMCP, client) -> None:
             if register_date:
                 participant_values["register_date"] = register_date
 
+            if not record_contribution:
+                # Simple path: just create the participant
+                participant_result = await client.api4(
+                    "Participant", "create", {"values": participant_values},
+                )
+                return json.dumps({
+                    "participant": participant_result.get("values", []),
+                }, indent=2)
+
+            # Contribution path: look up event financial type before any mutations
+            event = await client.api4("Event", "get", {
+                "select": ["title", "financial_type_id:name"],
+                "where": [["id", "=", event_id]],
+                "limit": 1,
+            })
+            if not event.get("values"):
+                return json.dumps({"error": f"Event {event_id} not found"})
+            financial_type = event["values"][0].get("financial_type_id:name") or "Event Fee"
+
+            # Step 1: Create participant
             participant_result = await client.api4(
                 "Participant", "create", {"values": participant_values},
             )
+            if not participant_result.get("values"):
+                return json.dumps({"error": "Participant creation returned no data"})
+            participant_id = participant_result["values"][0]["id"]
 
-            response: dict[str, Any] = {
-                "participant": participant_result.get("values", []),
-            }
-
-            if record_contribution and contribution_amount is None:
-                return json.dumps({
-                    "error": "contribution_amount is required when record_contribution is True",
+            try:
+                # Step 2: Create contribution
+                contribution_result = await client.api4("Contribution", "create", {
+                    "values": {
+                        "contact_id": contact_id,
+                        "total_amount": contribution_amount,
+                        "financial_type_id:name": financial_type,
+                        "contribution_status_id:name": "Completed",
+                        "source": f"Event registration: Event {event_id}",
+                    },
                 })
-
-            if record_contribution and contribution_amount is not None:
+                if not contribution_result.get("values"):
+                    raise CiviCRMAPIError("Contribution creation returned no data")
+                contribution_id = contribution_result["values"][0]["id"]
+            except CiviCRMAPIError as contrib_exc:
+                cleanup_warning = ""
                 try:
-                    event = await client.api4("Event", "get", {
-                        "select": ["title", "financial_type_id:name"],
-                        "where": [["id", "=", event_id]],
-                        "limit": 1,
+                    await client.api4("Participant", "delete", {
+                        "where": [["id", "=", participant_id]],
+                        "useTrash": False,
                     })
-                    financial_type = "Event Fee"
-                    if event.get("values"):
-                        ft = event["values"][0].get("financial_type_id:name")
-                        if ft:
-                            financial_type = ft
+                except CiviCRMAPIError as cleanup_exc:
+                    cleanup_warning = f" WARNING: cleanup of participant {participant_id} also failed: {cleanup_exc}"
+                raise CiviCRMAPIError(
+                    f"Event registration rolled back — contribution failed: {contrib_exc}.{cleanup_warning}"
+                ) from contrib_exc
 
-                    contribution_result = await client.api4("Contribution", "create", {
-                        "values": {
-                            "contact_id": contact_id,
-                            "total_amount": contribution_amount,
-                            "financial_type_id:name": financial_type,
-                            "contribution_status_id:name": "Completed",
-                            "source": f"Event registration: Event {event_id}",
-                        },
+            # Step 3: Link participant and contribution
+            try:
+                await client.api4("ParticipantPayment", "create", {"values": {
+                    "participant_id": participant_id,
+                    "contribution_id": contribution_id,
+                }})
+            except CiviCRMAPIError as link_exc:
+                cleanup_warnings = []
+                try:
+                    await client.api4("Contribution", "delete", {
+                        "where": [["id", "=", contribution_id]],
                     })
-                    response["contribution"] = contribution_result.get("values", [])
+                except CiviCRMAPIError as ce:
+                    cleanup_warnings.append(f"contribution {contribution_id}: {ce}")
+                try:
+                    await client.api4("Participant", "delete", {
+                        "where": [["id", "=", participant_id]],
+                        "useTrash": False,
+                    })
+                except CiviCRMAPIError as pe:
+                    cleanup_warnings.append(f"participant {participant_id}: {pe}")
+                warning_str = f" WARNING: cleanup failed for {', '.join(cleanup_warnings)}" if cleanup_warnings else ""
+                raise CiviCRMAPIError(
+                    f"Event registration rolled back — payment link failed: {link_exc}.{warning_str}"
+                ) from link_exc
 
-                    if participant_result.get("values") and contribution_result.get("values"):
-                        participant_id = participant_result["values"][0]["id"]
-                        contribution_id = contribution_result["values"][0]["id"]
-                        await client.api4("ParticipantPayment", "create", {"values": {
-                            "participant_id": participant_id,
-                            "contribution_id": contribution_id,
-                        }})
-                except CiviCRMAPIError as contrib_exc:
-                    response["contribution_warning"] = (
-                        f"Participant created successfully but contribution failed: {contrib_exc}"
-                    )
+            return json.dumps({
+                "participant": participant_result.get("values", []),
+                "contribution": contribution_result.get("values", []),
+            }, indent=2)
 
-            return json.dumps(response, indent=2)
         except CiviCRMAPIError as exc:
             return f"Error registering for event: {exc}"
 

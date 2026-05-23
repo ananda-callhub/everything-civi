@@ -98,7 +98,7 @@ async def test_system_flush(mock_client: MockCiviCRMClient, tools):
     assert "completed" in result["message"]
 
     # Verify the API call was made
-    assert mock_client.calls[0] == ("System", "flush", {})
+    assert mock_client.calls[0][:3] == ("System", "flush", {})
 
 
 @pytest.mark.asyncio

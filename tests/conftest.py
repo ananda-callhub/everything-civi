@@ -13,7 +13,7 @@ class MockCiviCRMClient:
     """Test double for CiviCRMClient that records calls and returns canned responses."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, dict | None]] = []
+        self.calls: list[tuple[str, str, dict | None, str | None]] = []
         self._responses: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, CiviCRMAPIError] = {}
         self._sequences: dict[str, list[dict[str, Any]]] = {}
@@ -56,8 +56,10 @@ class MockCiviCRMClient:
         entity: str,
         action: str,
         params: dict[str, Any] | None = None,
+        *,
+        token: str | None = None,
     ) -> dict[str, Any]:
-        self.calls.append((entity, action, copy.deepcopy(params)))
+        self.calls.append((entity, action, copy.deepcopy(params), token))
         key = f"{entity}.{action}"
         if key in self._errors:
             raise self._errors[key]
@@ -70,25 +72,61 @@ class MockCiviCRMClient:
             return self._responses[key]
         return dict(self._default_response)
 
-    async def get(self, entity: str, **params: Any) -> dict[str, Any]:
-        return await self.api4(entity, "get", params or None)
+    async def get(
+        self, entity: str, *, token: str | None = None, **params: Any,
+    ) -> dict[str, Any]:
+        return await self.api4(entity, "get", params or None, token=token)
 
-    async def create(self, entity: str, values: dict[str, Any]) -> dict[str, Any]:
-        return await self.api4(entity, "create", {"values": values})
+    async def create(
+        self, entity: str, values: dict[str, Any], *, token: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.api4(entity, "create", {"values": values}, token=token)
 
     async def get_fields(
         self,
         entity: str,
         action: str = "get",
         load_options: bool | list[str] = False,
+        *,
+        token: str | None = None,
     ) -> dict[str, Any]:
         return await self.api4(
             entity, "getFields",
             {"action": action, "loadOptions": load_options},
+            token=token,
         )
 
-    async def get_actions(self, entity: str) -> dict[str, Any]:
-        return await self.api4(entity, "getActions")
+    async def update(
+        self, entity: str, values: dict[str, Any], where: list[Any],
+        *, token: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.api4(entity, "update", {"values": values, "where": where}, token=token)
+
+    async def delete(
+        self, entity: str, where: list[Any], use_trash: bool = True,
+        *, token: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.api4(entity, "delete", {"where": where, "useTrash": use_trash}, token=token)
+
+    async def save(
+        self, entity: str, records: list[dict[str, Any]], match: list[str] | None = None,
+        *, token: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {"records": records}
+        if match is not None:
+            params["match"] = match
+        return await self.api4(entity, "save", params, token=token)
+
+    async def replace(
+        self, entity: str, records: list[dict[str, Any]], where: list[Any],
+        *, token: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.api4(entity, "replace", {"records": records, "where": where}, token=token)
+
+    async def get_actions(
+        self, entity: str, *, token: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.api4(entity, "getActions", token=token)
 
     async def health_check(self) -> dict[str, Any]:
         """Check connectivity and return server info (mirrors CiviCRMClient)."""
