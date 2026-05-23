@@ -12,7 +12,7 @@ MCP server for complete CiviCRM operations. Connect any AI assistant to your Civ
 - Rate limiting to protect your CiviCRM instance
 - Structured JSON audit logging with PII protection
 - Tool permission allowlist for access control
-- 102 tests (unit + integration)
+- 142 tests (unit + integration)
 
 ## Quick Start
 
