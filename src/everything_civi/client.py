@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -23,6 +24,10 @@ class CiviCRMClient:
     def __init__(self, config: CiviCRMConfig) -> None:
         self._config = config
         self._client: httpx.AsyncClient | None = None
+        self._semaphore: asyncio.Semaphore | None = None
+        self._max_concurrent = config.max_concurrent
+        self._max_retries = config.max_retries
+        self._retry_delay = config.retry_delay
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -37,6 +42,11 @@ class CiviCRMClient:
             )
         return self._client
 
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self._max_concurrent)
+        return self._semaphore
+
     async def api4(
         self,
         entity: str,
@@ -44,41 +54,82 @@ class CiviCRMClient:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         client = self._get_client()
+        semaphore = self._get_semaphore()
         url = f"/civicrm/ajax/api4/{entity}/{action}"
         form_data = {"params": json.dumps(params)} if params else {}
 
+        last_error: CiviCRMAPIError | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                async with semaphore:
+                    response = await client.post(url, data=form_data)
+                    response.raise_for_status()
+            except httpx.TimeoutException:
+                last_error = CiviCRMAPIError(
+                    error_message=f"Request timed out: {url}",
+                )
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._retry_delay * (2**attempt))
+                    continue
+                raise last_error
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code >= 500:
+                    last_error = CiviCRMAPIError(
+                        error_message=(
+                            f"HTTP {exc.response.status_code} from "
+                            f"{url}: {exc.response.text[:500]}"
+                        ),
+                        error_code=exc.response.status_code,
+                    )
+                    if attempt < self._max_retries:
+                        await asyncio.sleep(self._retry_delay * (2**attempt))
+                        continue
+                    raise last_error
+                raise CiviCRMAPIError(
+                    error_message=(
+                        f"HTTP {exc.response.status_code} from "
+                        f"{url}: {exc.response.text[:500]}"
+                    ),
+                    error_code=exc.response.status_code,
+                )
+            except httpx.HTTPError as exc:
+                last_error = CiviCRMAPIError(
+                    error_message=f"HTTP error: {exc}",
+                )
+                if attempt < self._max_retries:
+                    await asyncio.sleep(self._retry_delay * (2**attempt))
+                    continue
+                raise last_error
+
+            content_type = response.headers.get("content-type", "")
+            if "application/json" not in content_type and "text/json" not in content_type:
+                raise CiviCRMAPIError(
+                    error_message=(
+                        "Expected JSON response but received "
+                        f"{content_type!r}. This usually indicates an "
+                        "authentication failure or misconfigured URL."
+                    ),
+                )
+
+            data = response.json()
+
+            if "error_message" in data:
+                raise CiviCRMAPIError(
+                    error_message=data["error_message"],
+                    error_code=data.get("error_code", 0),
+                )
+
+            return data
+
+        raise last_error  # type: ignore[misc]
+
+    async def health_check(self) -> dict[str, Any]:
+        """Check connectivity and return server info."""
         try:
-            response = await client.post(url, data=form_data)
-            response.raise_for_status()
-        except httpx.TimeoutException:
-            raise CiviCRMAPIError(error_message=f"Request timed out: {url}")
-        except httpx.HTTPStatusError as exc:
-            raise CiviCRMAPIError(
-                error_message=f"HTTP {exc.response.status_code} from {url}: {exc.response.text[:500]}",
-                error_code=exc.response.status_code,
-            )
-        except httpx.HTTPError as exc:
-            raise CiviCRMAPIError(error_message=f"HTTP error: {exc}")
-
-        content_type = response.headers.get("content-type", "")
-        if "application/json" not in content_type and "text/json" not in content_type:
-            raise CiviCRMAPIError(
-                error_message=(
-                    "Expected JSON response but received "
-                    f"{content_type!r}. This usually indicates an "
-                    "authentication failure or misconfigured URL."
-                ),
-            )
-
-        data = response.json()
-
-        if "error_message" in data:
-            raise CiviCRMAPIError(
-                error_message=data["error_message"],
-                error_code=data.get("error_code", 0),
-            )
-
-        return data
+            result = await self.api4("System", "check", {})
+            return {"status": "ok", "checks": result.get("values", [])}
+        except CiviCRMAPIError as exc:
+            return {"status": "error", "error": str(exc)}
 
     # -- Convenience methods ---------------------------------------------------
 
@@ -144,6 +195,7 @@ class CiviCRMClient:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        self._semaphore = None
 
     async def __aenter__(self) -> "CiviCRMClient":
         return self

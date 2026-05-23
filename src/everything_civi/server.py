@@ -1,5 +1,8 @@
+from contextlib import asynccontextmanager
+
 from mcp.server.fastmcp import FastMCP
 
+from everything_civi.admin_tools import register_admin_tools
 from everything_civi.client import CiviCRMClient
 from everything_civi.config import CiviCRMConfig
 from everything_civi.crud_tools import register_crud_tools
@@ -13,9 +16,17 @@ from everything_civi.workflow_tools import register_workflow_tools
 config = CiviCRMConfig()
 client = CiviCRMClient(config)
 
+
+@asynccontextmanager
+async def lifespan(server):
+    yield
+    await client.close()
+
+
 mcp = FastMCP(
     "everything-civi",
     instructions="MCP server for complete CiviCRM operations — contacts, activities, contributions, memberships, events, and more.",
+    lifespan=lifespan,
 )
 
 register_crud_tools(mcp, client)
@@ -23,6 +34,7 @@ register_discovery_tools(mcp, client)
 register_workflow_tools(mcp, client)
 register_searchkit_tools(mcp, client)
 register_utility_tools(mcp, client)
+register_admin_tools(mcp, client)
 register_resources(mcp, client)
 register_prompts(mcp)
 

@@ -90,6 +90,14 @@ class MockCiviCRMClient:
     async def get_actions(self, entity: str) -> dict[str, Any]:
         return await self.api4(entity, "getActions")
 
+    async def health_check(self) -> dict[str, Any]:
+        """Check connectivity and return server info (mirrors CiviCRMClient)."""
+        try:
+            result = await self.api4("System", "check", {})
+            return {"status": "ok", "checks": result.get("values", [])}
+        except CiviCRMAPIError as exc:
+            return {"status": "error", "error": str(exc)}
+
     async def close(self) -> None:
         pass
 
