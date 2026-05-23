@@ -8,6 +8,7 @@ MCP server for complete CiviCRM operations. Connect any AI assistant to your Civ
 - **3 MCP prompts** for guided CiviCRM administration, data import, and reporting
 - **3 resources** with query construction guides and live entity listings
 - Works with any CiviCRM 5.x instance (WordPress, Drupal, Joomla, Standalone)
+- Compatible with Claude, OpenAI, Gemini, Cursor, VS Code, and any MCP client
 - Retry with exponential backoff for transient errors
 - Rate limiting to protect your CiviCRM instance
 - Structured JSON audit logging with PII protection
@@ -99,6 +100,86 @@ Add to your project's `.mcp.json`:
     }
   }
 }
+```
+
+### Use with OpenAI Agents SDK
+
+```python
+from agents import Agent
+from agents.mcp import MCPServerStdio
+
+async with MCPServerStdio(
+    command="everything-civi",
+    env={
+        "CIVICRM_BASE_URL": "https://your-civicrm-site.org",
+        "CIVICRM_API_KEY": "your-api-key-here",
+    },
+) as mcp:
+    agent = Agent(name="CiviCRM Assistant", mcp_servers=[mcp])
+```
+
+### Use with Cursor
+
+Add to your Cursor MCP config (`.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "everything-civi": {
+      "command": "/path/to/everything-civi/.venv/bin/everything-civi",
+      "env": {
+        "CIVICRM_BASE_URL": "https://your-civicrm-site.org",
+        "CIVICRM_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
+### Use with VS Code / GitHub Copilot
+
+Add to your VS Code settings (`.vscode/settings.json`):
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "everything-civi": {
+        "command": "/path/to/everything-civi/.venv/bin/everything-civi",
+        "env": {
+          "CIVICRM_BASE_URL": "https://your-civicrm-site.org",
+          "CIVICRM_API_KEY": "your-api-key-here"
+        }
+      }
+    }
+  }
+}
+```
+
+### Use with Gemini CLI
+
+Add to your Gemini CLI settings (`~/.gemini/settings.json`):
+
+```json
+{
+  "mcpServers": {
+    "everything-civi": {
+      "command": "/path/to/everything-civi/.venv/bin/everything-civi",
+      "env": {
+        "CIVICRM_BASE_URL": "https://your-civicrm-site.org",
+        "CIVICRM_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
+
+### Validate with MCP Inspector
+
+Test your server interactively with the official MCP Inspector:
+
+```bash
+npx @anthropic-ai/mcp-inspector everything-civi
 ```
 
 ## Tools
