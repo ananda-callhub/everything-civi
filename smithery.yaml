@@ -1,0 +1,52 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    required:
+      - civicrm_base_url
+      - civicrm_api_key
+    properties:
+      civicrm_base_url:
+        type: string
+        description: "Your CiviCRM instance URL (e.g., https://your-site.org)"
+      civicrm_api_key:
+        type: string
+        description: "API key for CiviCRM authentication"
+      civicrm_verify_ssl:
+        type: boolean
+        default: true
+        description: "Verify SSL certificates"
+      civicrm_timeout:
+        type: integer
+        default: 30
+        description: "Request timeout in seconds"
+      civicrm_max_retries:
+        type: integer
+        default: 2
+        description: "Retries on transient errors (5xx, timeouts)"
+      civicrm_max_concurrent:
+        type: integer
+        default: 5
+        description: "Maximum concurrent API requests"
+      civicrm_audit_log:
+        type: boolean
+        default: true
+        description: "Enable structured JSON audit logging"
+      civicrm_allowed_tools:
+        type: string
+        default: ""
+        description: "Comma-separated tool allowlist (empty = all tools)"
+  commandFunction: |
+    (config) => ({
+      command: 'everything-civi',
+      env: {
+        CIVICRM_BASE_URL: config.civicrm_base_url,
+        CIVICRM_API_KEY: config.civicrm_api_key,
+        ...(config.civicrm_verify_ssl !== undefined && { CIVICRM_VERIFY_SSL: String(config.civicrm_verify_ssl) }),
+        ...(config.civicrm_timeout !== undefined && { CIVICRM_TIMEOUT: String(config.civicrm_timeout) }),
+        ...(config.civicrm_max_retries !== undefined && { CIVICRM_MAX_RETRIES: String(config.civicrm_max_retries) }),
+        ...(config.civicrm_max_concurrent !== undefined && { CIVICRM_MAX_CONCURRENT: String(config.civicrm_max_concurrent) }),
+        ...(config.civicrm_audit_log !== undefined && { CIVICRM_AUDIT_LOG: String(config.civicrm_audit_log) }),
+        ...(config.civicrm_allowed_tools && { CIVICRM_ALLOWED_TOOLS: config.civicrm_allowed_tools }),
+      }
+    })
