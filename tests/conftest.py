@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import os
 from typing import Any
 import pytest
@@ -15,6 +16,7 @@ class MockCiviCRMClient:
         self.calls: list[tuple[str, str, dict | None]] = []
         self._responses: dict[str, dict[str, Any]] = {}
         self._errors: dict[str, CiviCRMAPIError] = {}
+        self._sequences: dict[str, list[dict[str, Any]]] = {}
         self._default_response: dict[str, Any] = {"values": []}
 
     async def __aenter__(self):
@@ -40,16 +42,30 @@ class MockCiviCRMClient:
     ) -> None:
         self._errors[f"{entity}.{action}"] = CiviCRMAPIError(error_message, error_code)
 
+    def set_response_sequence(
+        self,
+        entity: str,
+        action: str,
+        responses: list[dict[str, Any]],
+    ) -> None:
+        """Set a sequence of responses returned in order. After exhaustion, returns the last one."""
+        self._sequences[f"{entity}.{action}"] = list(responses)
+
     async def api4(
         self,
         entity: str,
         action: str,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        self.calls.append((entity, action, params))
+        self.calls.append((entity, action, copy.deepcopy(params)))
         key = f"{entity}.{action}"
         if key in self._errors:
             raise self._errors[key]
+        if key in self._sequences:
+            seq = self._sequences[key]
+            if len(seq) > 1:
+                return seq.pop(0)
+            return seq[0]  # repeat last response
         if key in self._responses:
             return self._responses[key]
         return dict(self._default_response)
