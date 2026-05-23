@@ -2,11 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 
 import httpx
 from typing import Any
 
 from everything_civi.config import CiviCRMConfig
+
+logger = logging.getLogger("everything_civi.audit")
+
+# Entities whose param keys should never be logged (PII / security risk).
+_SENSITIVE_ENTITIES = frozenset({
+    "Contact", "Email", "Phone", "Address", "Individual", "Household",
+    "Organization", "Note", "Relationship", "IM", "Website", "OpenID",
+    "Contribution", "Pledge", "Participant", "Case", "GroupContact",
+})
 
 
 class CiviCRMAPIError(Exception):
@@ -47,12 +58,30 @@ class CiviCRMClient:
             self._semaphore = asyncio.Semaphore(self._max_concurrent)
         return self._semaphore
 
+    def _audit_param_keys(
+        self, entity: str, params: dict[str, Any] | None,
+    ) -> list[str] | None:
+        """Return top-level param keys for logging, or None for sensitive entities."""
+        if entity in _SENSITIVE_ENTITIES:
+            return None
+        return list(params.keys()) if params else []
+
+    @staticmethod
+    def _audit_error_msg(entity: str, error: Exception) -> str:
+        if entity in _SENSITIVE_ENTITIES:
+            return f"[redacted — {type(error).__name__}]"
+        return str(error)
+
     async def api4(
         self,
         entity: str,
         action: str,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        audit = self._config.audit_log
+        start_time = time.monotonic()
+        param_keys = self._audit_param_keys(entity, params) if audit else None
+
         client = self._get_client()
         semaphore = self._get_semaphore()
         url = f"/civicrm/ajax/api4/{entity}/{action}"
@@ -69,8 +98,32 @@ class CiviCRMClient:
                     error_message=f"Request timed out: {url}",
                 )
                 if attempt < self._max_retries:
+                    if audit:
+                        logger.info(
+                            "api4_retry",
+                            extra={
+                                "entity": entity,
+                                "action": action,
+                                "attempt": attempt + 1,
+                                "retry_reason": "timeout",
+                            },
+                        )
                     await asyncio.sleep(self._retry_delay * (2**attempt))
                     continue
+                if audit:
+                    duration_ms = (time.monotonic() - start_time) * 1000
+                    logger.warning(
+                        "api4_call",
+                        extra={
+                            "entity": entity,
+                            "action": action,
+                            "duration_ms": round(duration_ms, 2),
+                            "status": "error",
+                            "error_type": "TimeoutException",
+                            "error_message": self._audit_error_msg(entity, last_error),
+                            "param_keys": param_keys,
+                        },
+                    )
                 raise last_error
             except httpx.HTTPStatusError as exc:
                 if exc.response.status_code >= 500:
@@ -82,43 +135,148 @@ class CiviCRMClient:
                         error_code=exc.response.status_code,
                     )
                     if attempt < self._max_retries:
+                        if audit:
+                            logger.info(
+                                "api4_retry",
+                                extra={
+                                    "entity": entity,
+                                    "action": action,
+                                    "attempt": attempt + 1,
+                                    "retry_reason": f"http_{exc.response.status_code}",
+                                },
+                            )
                         await asyncio.sleep(self._retry_delay * (2**attempt))
                         continue
+                    if audit:
+                        duration_ms = (time.monotonic() - start_time) * 1000
+                        logger.warning(
+                            "api4_call",
+                            extra={
+                                "entity": entity,
+                                "action": action,
+                                "duration_ms": round(duration_ms, 2),
+                                "status": "error",
+                                "error_type": "HTTPStatusError",
+                                "error_message": self._audit_error_msg(entity, last_error),
+                                "param_keys": param_keys,
+                            },
+                        )
                     raise last_error
-                raise CiviCRMAPIError(
+                non_retryable = CiviCRMAPIError(
                     error_message=(
                         f"HTTP {exc.response.status_code} from "
                         f"{url}: {exc.response.text[:500]}"
                     ),
                     error_code=exc.response.status_code,
                 )
+                if audit:
+                    duration_ms = (time.monotonic() - start_time) * 1000
+                    logger.warning(
+                        "api4_call",
+                        extra={
+                            "entity": entity,
+                            "action": action,
+                            "duration_ms": round(duration_ms, 2),
+                            "status": "error",
+                            "error_type": "HTTPStatusError",
+                            "error_message": self._audit_error_msg(entity, non_retryable),
+                            "param_keys": param_keys,
+                        },
+                    )
+                raise non_retryable
             except httpx.HTTPError as exc:
                 last_error = CiviCRMAPIError(
                     error_message=f"HTTP error: {exc}",
                 )
                 if attempt < self._max_retries:
+                    if audit:
+                        logger.info(
+                            "api4_retry",
+                            extra={
+                                "entity": entity,
+                                "action": action,
+                                "attempt": attempt + 1,
+                                "retry_reason": "http_error",
+                            },
+                        )
                     await asyncio.sleep(self._retry_delay * (2**attempt))
                     continue
+                if audit:
+                    duration_ms = (time.monotonic() - start_time) * 1000
+                    logger.warning(
+                        "api4_call",
+                        extra={
+                            "entity": entity,
+                            "action": action,
+                            "duration_ms": round(duration_ms, 2),
+                            "status": "error",
+                            "error_type": "HTTPError",
+                            "error_message": self._audit_error_msg(entity, last_error),
+                            "param_keys": param_keys,
+                        },
+                    )
                 raise last_error
 
             content_type = response.headers.get("content-type", "")
             if "application/json" not in content_type and "text/json" not in content_type:
-                raise CiviCRMAPIError(
+                api_err = CiviCRMAPIError(
                     error_message=(
                         "Expected JSON response but received "
                         f"{content_type!r}. This usually indicates an "
                         "authentication failure or misconfigured URL."
                     ),
                 )
+                if audit:
+                    duration_ms = (time.monotonic() - start_time) * 1000
+                    logger.warning(
+                        "api4_call",
+                        extra={
+                            "entity": entity,
+                            "action": action,
+                            "duration_ms": round(duration_ms, 2),
+                            "status": "error",
+                            "error_type": "CiviCRMAPIError",
+                            "error_message": self._audit_error_msg(entity, api_err),
+                            "param_keys": param_keys,
+                        },
+                    )
+                raise api_err
 
             data = response.json()
 
             if "error_message" in data:
-                raise CiviCRMAPIError(
+                api_err = CiviCRMAPIError(
                     error_message=data["error_message"],
                     error_code=data.get("error_code", 0),
                 )
+                if audit:
+                    duration_ms = (time.monotonic() - start_time) * 1000
+                    logger.warning(
+                        "api4_call",
+                        extra={
+                            "entity": entity,
+                            "action": action,
+                            "duration_ms": round(duration_ms, 2),
+                            "status": "error",
+                            "error_type": "CiviCRMAPIError",
+                            "error_message": self._audit_error_msg(entity, api_err),
+                            "param_keys": param_keys,
+                        },
+                    )
+                raise api_err
 
+            if audit:
+                duration_ms = (time.monotonic() - start_time) * 1000
+                logger.info(
+                    "api4_call",
+                    extra={
+                        "entity": entity,
+                        "action": action,
+                        "duration_ms": round(duration_ms, 2),
+                        "status": "success",
+                        "param_keys": param_keys,
+                    },
+                )
             return data
 
         raise last_error  # type: ignore[misc]

@@ -10,7 +10,9 @@ MCP server for complete CiviCRM operations. Connect any AI assistant to your Civ
 - Works with any CiviCRM 5.x instance (WordPress, Drupal, Joomla, Standalone)
 - Retry with exponential backoff for transient errors
 - Rate limiting to protect your CiviCRM instance
-- 81 tests (unit + integration)
+- Structured JSON audit logging with PII protection
+- Tool permission allowlist for access control
+- 102 tests (unit + integration)
 
 ## Quick Start
 
@@ -197,14 +199,18 @@ All settings are configured via environment variables with the `CIVICRM_` prefix
 | `CIVICRM_MAX_RETRIES` | `2` | Retries on transient errors (5xx, timeouts) |
 | `CIVICRM_RETRY_DELAY` | `1.0` | Base delay for exponential backoff (seconds) |
 | `CIVICRM_MAX_CONCURRENT` | `5` | Maximum concurrent API requests |
+| `CIVICRM_LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+| `CIVICRM_AUDIT_LOG` | `true` | Enable structured JSON audit logging of API calls |
+| `CIVICRM_ALLOWED_TOOLS` | (empty) | Comma-separated tool allowlist (empty = all tools) |
 
 ## Architecture
 
 ```
 src/everything_civi/
-├── server.py            # FastMCP setup with lifespan management
+├── server.py            # FastMCP setup, lifespan, tool allowlist
 ├── config.py            # Pydantic settings with env var binding
-├── client.py            # Async REST client with retry + rate limiting
+├── client.py            # Async REST client with retry, rate limiting, audit logging
+├── logging_config.py    # Structured JSON log formatter
 ├── crud_tools.py        # 6 generic CRUD tools
 ├── discovery_tools.py   # 5 schema introspection tools
 ├── workflow_tools.py    # 9 domain-specific workflow tools
