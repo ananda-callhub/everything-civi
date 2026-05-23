@@ -48,6 +48,9 @@ CIVICRM_TIMEOUT=30
 CIVICRM_MAX_RETRIES=2
 CIVICRM_RETRY_DELAY=1.0
 CIVICRM_MAX_CONCURRENT=5
+CIVICRM_LOG_LEVEL=INFO
+CIVICRM_AUDIT_LOG=true
+CIVICRM_ALLOWED_TOOLS=
 ```
 
 To generate an API key in CiviCRM: go to **Contacts > your admin contact > API Keys**, or run:
@@ -203,6 +206,63 @@ All settings are configured via environment variables with the `CIVICRM_` prefix
 | `CIVICRM_AUDIT_LOG` | `true` | Enable structured JSON audit logging of API calls |
 | `CIVICRM_ALLOWED_TOOLS` | (empty) | Comma-separated tool allowlist (empty = all tools) |
 
+## Security and Enterprise Features
+
+### Audit Logging
+
+Every CiviCRM API call is logged as structured JSON to stdout with timestamp, entity, action, duration, and success/failure status:
+
+```json
+{"timestamp": "2026-05-23T14:30:00Z", "level": "INFO", "logger": "everything_civi.audit", "message": "api4_call", "entity": "Activity", "action": "get", "duration_ms": 42.5, "status": "success", "param_keys": ["select", "where", "limit"]}
+```
+
+PII protection is built in — sensitive entities (Contact, Email, Phone, Address, Contribution, Case, and others) have their parameter keys and error messages redacted in logs. You will never see personal data in audit output.
+
+Control via environment variables:
+
+```env
+CIVICRM_AUDIT_LOG=true       # Enable/disable audit logging (default: true)
+CIVICRM_LOG_LEVEL=INFO       # Logging level: DEBUG, INFO, WARNING, ERROR
+```
+
+### Tool Permission Allowlist
+
+Restrict which tools are exposed to MCP clients. When set, only the listed tools are available — all others are removed at startup:
+
+```env
+CIVICRM_ALLOWED_TOOLS=civicrm_get,civicrm_list_entities,civicrm_describe_entity,civicrm_search_contacts
+```
+
+When empty or unset, all 28 tools are available (default). Resources and prompts are not filtered.
+
+The server logs warnings for unrecognized tool names and errors if the allowlist results in zero available tools.
+
+This is a defense-in-depth measure — CiviCRM also enforces its own permission model server-side based on the authenticated user's roles.
+
+### Per-Request JWT Auth Forwarding
+
+The client supports per-request token overrides for multi-user deployments. Instead of a single static API key, each API call can carry a different Bearer token:
+
+```python
+# Default: uses CIVICRM_API_KEY from config
+result = await client.api4("Contact", "get", params)
+
+# Override: uses a per-user JWT for this specific call
+result = await client.api4("Contact", "get", params, token=user_jwt)
+```
+
+This works with CiviCRM's `authx` extension (bundled since 5.36), which accepts both API keys and JWTs via the `Authorization: Bearer` header. The token is never logged in audit output.
+
+All convenience methods (`get`, `create`, `update`, `delete`, `save`, `replace`, `get_fields`, `get_actions`) accept the `token` keyword argument.
+
+### Error Recovery
+
+Multi-step workflow tools use rollback semantics to prevent orphaned records:
+
+- **Event registration with payment** (`civicrm_register_for_event`): If contribution or payment link creation fails after the participant is created, the participant is automatically deleted. Cleanup failures are reported in the error message so orphaned records can be identified.
+- **Contributions with notes** (`civicrm_record_contribution`): If note creation fails, the contribution is still returned with a warning — the note failure doesn't hide the successfully created contribution.
+- All validation (e.g., missing `contribution_amount`) runs before any API mutations.
+
 ## Architecture
 
 ```
@@ -231,10 +291,13 @@ The server uses a layered architecture:
 6. **Admin** — Health monitoring and cache management
 
 All tools communicate through a single async REST client with:
-- Bearer token authentication
+- Bearer token authentication (static API key or per-request JWT)
 - Form-encoded parameter passing (CiviCRM REST API requirement)
 - Retry with exponential backoff for transient errors
 - Semaphore-based rate limiting
+- Structured JSON audit logging with PII redaction
+- Tool permission allowlist for access control
+- Rollback semantics for multi-step operations
 - Lazy initialization to avoid event loop issues
 
 ## Development
@@ -248,7 +311,7 @@ uv pip install -e ".[dev]"
 
 # Run integration tests (requires live CiviCRM)
 CIVICRM_BASE_URL=https://your-site.org CIVICRM_API_KEY=your-key \
-  .venv/bin/pytest tests/test_integration.py -v
+  .venv/bin/pytest tests/test_integration*.py -v
 
 # Lint
 .venv/bin/ruff check src/ tests/
